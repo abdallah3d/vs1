@@ -7,3 +7,9 @@ verify_jwt = false
 
 [functions.monitor-check]
 verify_jwt = false
+
+[functions.daily-brief]
+verify_jwt = false
+
+[functions.github]
+verify_jwt = false

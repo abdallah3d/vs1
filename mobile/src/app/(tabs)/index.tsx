@@ -3,7 +3,7 @@ import { useMemo, useState } from 'react';
 import { Alert, Pressable, RefreshControl, ScrollView, View } from 'react-native';
 import { Badge, Button, Card, Chip, Empty, ErrorNote, Input, Progress, Row, SectionTitle, T } from '../../components/ui';
 import { track } from '../../lib/activity';
-import { must, supabase } from '../../lib/supabase';
+import { invoke, must, supabase } from '../../lib/supabase';
 import { colors, PROJECT_COLORS, timeAgo, todayISO } from '../../lib/theme';
 import { PROJECT_STATUS_LABEL, type Project, type ProjectStatus, type Task } from '../../lib/types';
 import { useLoader } from '../../lib/useLoader';
@@ -42,6 +42,8 @@ export default function Projects() {
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} />}
     >
       <ErrorNote message={error} />
+
+      <BriefCard />
 
       <Row style={{ marginBottom: 12 }}>
         <Stat label="مشاريع شغالة" value={stats.active} />
@@ -95,7 +97,9 @@ export default function Projects() {
         );
       })}
 
-      <SignOut />
+      <Pressable onPress={() => router.push('/settings')} style={{ marginTop: 24, alignItems: 'center' }}>
+        <T muted size={13}>⚙️ الإعدادات</T>
+      </Pressable>
     </ScrollView>
   );
 }
@@ -163,10 +167,49 @@ function NewProject({ onCancel, onCreated }: { onCancel: () => void; onCreated: 
   );
 }
 
-function SignOut() {
+type Brief = { content: string; local_date: string; created_at: string };
+
+/** Today's morning brief from the agent, with a button to regenerate it now. */
+function BriefCard() {
+  const [busy, setBusy] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const { data, setData } = useLoader(async () => {
+    const res = await supabase.from('briefs').select('content, local_date, created_at').order('created_at', { ascending: false }).limit(1).maybeSingle();
+    if (res.error) throw new Error(res.error.message);
+    return res.data as Brief | null;
+  });
+
+  async function regenerate() {
+    setBusy(true);
+    try {
+      const res = await invoke<{ content: string }>('daily-brief');
+      setData({ content: res.content, local_date: todayISO(), created_at: new Date().toISOString() });
+      setExpanded(true);
+    } catch (e) {
+      Alert.alert('ما قدرت أكتب الملخص', e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const fresh = data && Date.now() - new Date(data.created_at).getTime() < 36 * 3600 * 1000;
+  const [headline, ...rest] = (fresh ? data.content : '').split('\n');
+
   return (
-    <Pressable onPress={() => supabase.auth.signOut()} style={{ marginTop: 24, alignItems: 'center' }}>
-      <T muted size={13}>تسجيل خروج</T>
-    </Pressable>
+    <Card style={{ backgroundColor: colors.primarySoft, borderColor: 'transparent', gap: 8 }}>
+      <Row style={{ justifyContent: 'space-between' }}>
+        <T bold>☀️ ملخص اليوم</T>
+        {fresh ? <T muted size={12}>{timeAgo(data.created_at)}</T> : null}
+      </Row>
+      {fresh ? (
+        <Pressable onPress={() => setExpanded(!expanded)}>
+          <T bold style={{ lineHeight: 22 }}>{headline}</T>
+          {expanded ? <T style={{ lineHeight: 22, marginTop: 6 }}>{rest.join('\n').trim()}</T> : <T muted size={12}>اضغط للتفاصيل</T>}
+        </Pressable>
+      ) : (
+        <T muted>ما فيه ملخص اليوم بعد. الأجينت يكتبه لك كل صباح، أو اطلبه الحين.</T>
+      )}
+      <Button title={fresh ? 'حدّث الملخص' : 'اكتب لي ملخص الحين'} variant="secondary" onPress={regenerate} loading={busy} />
+    </Card>
   );
 }

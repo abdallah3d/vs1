@@ -76,4 +76,5 @@ export const EVENT_LABEL: Record<string, string> = {
   task_updated: 'تعديل مهمة',
   monitor_added: 'رابط مراقبة جديد',
   agent_message: 'محادثة الأجينت',
+  github_linked: 'ربط مستودع GitHub',
 };

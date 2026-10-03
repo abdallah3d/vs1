@@ -1,6 +1,7 @@
 import type Anthropic from "npm:@anthropic-ai/sdk@0.131.0";
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2.117.2";
 import { adminClient } from "../_shared/http.ts";
+import { parseRepo, repoSummary } from "../_shared/github.ts";
 import { runChecks } from "../_shared/monitors.ts";
 
 type Input = Record<string, unknown>;
@@ -116,6 +117,27 @@ export const TOOLS: Anthropic.Beta.BetaTool[] = [
     },
   },
   {
+    name: "get_github_activity",
+    description:
+      "Recent GitHub activity for repos linked to the user's projects: commits in the period, open pull requests, last push. Pass project_id to limit to one project.",
+    input_schema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string" },
+        days: { type: "integer", minimum: 1, maximum: 30, description: "Look-back window for commits, default 7." },
+      },
+    },
+  },
+  {
+    name: "link_github_repo",
+    description: "Link a GitHub repository (owner/repo or github.com URL) to a project so its activity is tracked.",
+    input_schema: {
+      type: "object",
+      properties: { project_id: { type: "string" }, repo: { type: "string" } },
+      required: ["project_id", "repo"],
+    },
+  },
+  {
     name: "get_activity",
     description:
       "How the user has been using this app: events per day, counts per event type, tasks completed, and projects with no activity in the period.",
@@ -157,16 +179,18 @@ function must<T>(res: { data: T; error: { message: string } | null }): T {
   return res.data;
 }
 
-async function log(db: SupabaseClient, event: string, projectId: string | null, meta: Record<string, unknown> = {}) {
-  await db.from("activity_log").insert({ event, project_id: projectId, meta: { ...meta, source: "agent" } });
-}
-
 type Ctx = { db: SupabaseClient; userId: string };
 
+// Every query filters on user_id explicitly (not only via RLS) so these tools
+// are also safe to run with the service-role client, as the daily brief does.
 export async function runTool(name: string, input: Input, { db, userId }: Ctx): Promise<unknown> {
+  const log = async (event: string, projectId: string | null, meta: Record<string, unknown> = {}) => {
+    await db.from("activity_log").insert({ user_id: userId, event, project_id: projectId, meta: { ...meta, source: "agent" } });
+  };
+
   switch (name) {
     case "list_projects": {
-      let q = db.from("projects").select("id, name, description, status, due_date, updated_at, tasks(status, due_date, updated_at)");
+      let q = db.from("projects").select("id, name, description, status, due_date, updated_at, tasks(status, due_date, updated_at)").eq("user_id", userId);
       const status = oneOf(input, "status", PROJECT_STATUSES);
       if (status) q = q.eq("status", status);
       const rows = must(await q.order("updated_at", { ascending: false })) as Array<{
@@ -189,23 +213,25 @@ export async function runTool(name: string, input: Input, { db, userId }: Ctx): 
 
     case "get_project": {
       const id = str(input, "project_id", true)!;
-      const project = must(await db.from("projects").select("*").eq("id", id).maybeSingle());
+      const project = must(await db.from("projects").select("*").eq("id", id).eq("user_id", userId).maybeSingle());
       if (!project) throw new Error("Project not found");
-      const tasks = must(await db.from("tasks").select("id, title, notes, status, priority, due_date, completed_at").eq("project_id", id).order("created_at"));
-      const monitors = must(await db.from("monitor_latest").select("*").eq("project_id", id));
-      return { project, tasks, monitors };
+      const tasks = must(await db.from("tasks").select("id, title, notes, status, priority, due_date, completed_at").eq("project_id", id).eq("user_id", userId).order("created_at"));
+      const monitors = must(await db.from("monitor_latest").select("*").eq("project_id", id).eq("user_id", userId));
+      const github_repos = must(await db.from("github_repos").select("full_name").eq("project_id", id).eq("user_id", userId));
+      return { project, tasks, monitors, github_repos };
     }
 
     case "create_project": {
       const row = must(
         await db.from("projects").insert(defined({
+          user_id: userId,
           name: str(input, "name", true),
           description: str(input, "description"),
           status: oneOf(input, "status", PROJECT_STATUSES),
           due_date: date(input, "due_date"),
         })).select().single(),
       ) as { id: string; name: string };
-      await log(db, "project_created", row.id, { name: row.name });
+      await log("project_created", row.id, { name: row.name });
       return row;
     }
 
@@ -218,9 +244,9 @@ export async function runTool(name: string, input: Input, { db, userId }: Ctx): 
         due_date: date(input, "due_date"),
       });
       if (!Object.keys(patch).length) throw new Error("Nothing to update");
-      const row = must(await db.from("projects").update(patch).eq("id", id).select().maybeSingle());
+      const row = must(await db.from("projects").update(patch).eq("id", id).eq("user_id", userId).select().maybeSingle());
       if (!row) throw new Error("Project not found");
-      await log(db, "project_updated", id, { fields: Object.keys(patch) });
+      await log("project_updated", id, { fields: Object.keys(patch) });
       return row;
     }
 
@@ -228,6 +254,7 @@ export async function runTool(name: string, input: Input, { db, userId }: Ctx): 
       const projectId = str(input, "project_id", true)!;
       const row = must(
         await db.from("tasks").insert(defined({
+          user_id: userId,
           project_id: projectId,
           title: str(input, "title", true),
           notes: str(input, "notes"),
@@ -235,7 +262,7 @@ export async function runTool(name: string, input: Input, { db, userId }: Ctx): 
           due_date: date(input, "due_date"),
         })).select().single(),
       ) as { id: string; title: string };
-      await log(db, "task_created", projectId, { title: row.title });
+      await log("task_created", projectId, { title: row.title });
       return row;
     }
 
@@ -248,19 +275,19 @@ export async function runTool(name: string, input: Input, { db, userId }: Ctx): 
         due_date: date(input, "due_date"),
       });
       if (!Object.keys(patch).length) throw new Error("Nothing to update");
-      const row = must(await db.from("tasks").update(patch).eq("id", id).select().maybeSingle()) as
+      const row = must(await db.from("tasks").update(patch).eq("id", id).eq("user_id", userId).select().maybeSingle()) as
         | { project_id: string; title: string } | null;
       if (!row) throw new Error("Task not found");
       const event = patch.status === "done" ? "task_completed" : patch.status ? "task_reopened" : "task_updated";
-      await log(db, event, row.project_id, { title: row.title });
+      await log(event, row.project_id, { title: row.title });
       return row;
     }
 
     case "get_monitors_status": {
-      const latest = must(await db.from("monitor_latest").select("*")) as Array<{ monitor_id: string }>;
+      const latest = must(await db.from("monitor_latest").select("*").eq("user_id", userId)) as Array<{ monitor_id: string }>;
       const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
       const checks = must(
-        await db.from("monitor_checks").select("monitor_id, ok, latency_ms, error, checked_at").gte("checked_at", since).order("checked_at", { ascending: false }),
+        await db.from("monitor_checks").select("monitor_id, ok, latency_ms, error, checked_at").eq("user_id", userId).gte("checked_at", since).order("checked_at", { ascending: false }),
       ) as Array<{ monitor_id: string; ok: boolean; latency_ms: number | null; error: string | null; checked_at: string }>;
       return latest.map((m) => {
         const mine = checks.filter((c) => c.monitor_id === m.monitor_id);
@@ -282,8 +309,8 @@ export async function runTool(name: string, input: Input, { db, userId }: Ctx): 
       const url = str(input, "url", true)!;
       if (!/^https?:\/\//i.test(url)) throw new Error("url must start with http:// or https://");
       const projectId = str(input, "project_id") ?? null;
-      const row = must(await db.from("monitors").insert({ name: str(input, "name", true), url, project_id: projectId }).select().single());
-      await log(db, "monitor_added", projectId, { url });
+      const row = must(await db.from("monitors").insert({ user_id: userId, name: str(input, "name", true), url, project_id: projectId }).select().single());
+      await log("monitor_added", projectId, { url });
       return row;
     }
 
@@ -292,9 +319,9 @@ export async function runTool(name: string, input: Input, { db, userId }: Ctx): 
       const days = typeof raw === "number" && raw >= 1 && raw <= 90 ? Math.floor(raw) : 7;
       const since = new Date(Date.now() - days * 24 * 3600 * 1000).toISOString();
       const events = must(
-        await db.from("activity_log").select("event, project_id, meta, created_at").gte("created_at", since).order("created_at", { ascending: false }).limit(2000),
+        await db.from("activity_log").select("event, project_id, meta, created_at").eq("user_id", userId).gte("created_at", since).order("created_at", { ascending: false }).limit(2000),
       ) as Array<{ event: string; project_id: string | null; meta: Record<string, unknown>; created_at: string }>;
-      const projects = must(await db.from("projects").select("id, name, status")) as Array<{ id: string; name: string; status: string }>;
+      const projects = must(await db.from("projects").select("id, name, status").eq("user_id", userId)) as Array<{ id: string; name: string; status: string }>;
 
       const perDay: Record<string, number> = {};
       const perEvent: Record<string, number> = {};
@@ -314,6 +341,30 @@ export async function runTool(name: string, input: Input, { db, userId }: Ctx): 
         untouched_active_projects: projects.filter((p) => p.status === "active" && !touched.has(p.id)).map((p) => p.name),
         latest_events: events.slice(0, 25),
       };
+    }
+
+    case "get_github_activity": {
+      const raw = input.days;
+      const days = typeof raw === "number" && raw >= 1 && raw <= 30 ? Math.floor(raw) : 7;
+      let q = db.from("github_repos").select("full_name, project_id, projects(name)").eq("user_id", userId);
+      const projectId = str(input, "project_id");
+      if (projectId) q = q.eq("project_id", projectId);
+      // projects is a many-to-one embed, so PostgREST returns an object (untyped client infers an array).
+      const repos = must(await q) as unknown as Array<{ full_name: string; project_id: string; projects: { name: string } | null }>;
+      if (!repos.length) return { repos: [], note: "No GitHub repos linked yet. Use link_github_repo." };
+      const summaries = await Promise.all(repos.map((r) => repoSummary(r.full_name, days)));
+      return summaries.map((s, i) => ({ project: repos[i].projects?.name ?? null, project_id: repos[i].project_id, ...s }));
+    }
+
+    case "link_github_repo": {
+      const projectId = str(input, "project_id", true)!;
+      const repo = parseRepo(str(input, "repo", true)!);
+      if (!repo) throw new Error("repo must look like owner/repo");
+      const summary = await repoSummary(repo, 7);
+      if (summary.error) throw new Error(summary.error);
+      must(await db.from("github_repos").insert({ user_id: userId, project_id: projectId, full_name: repo }).select().single());
+      await log("github_linked", projectId, { repo });
+      return summary;
     }
 
     default:

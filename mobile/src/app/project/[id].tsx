@@ -2,6 +2,7 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { Stack } from 'expo-router/stack';
 import { useState } from 'react';
 import { Alert, Pressable, RefreshControl, ScrollView, View } from 'react-native';
+import { GithubSection } from '../../components/GithubSection';
 import { Badge, Button, Card, Chip, Empty, ErrorNote, Input, Progress, Row, SectionTitle, T } from '../../components/ui';
 import { track } from '../../lib/activity';
 import { must, supabase } from '../../lib/supabase';
@@ -207,6 +208,8 @@ export default function ProjectScreen() {
             ))}
           </>
         ) : null}
+
+        <GithubSection projectId={id} />
 
         <Button title="حذف المشروع" variant="danger" onPress={deleteProject} style={{ marginTop: 24 }} />
       </ScrollView>

@@ -1,4 +1,6 @@
 import type { Session } from '@supabase/supabase-js';
+import * as Notifications from 'expo-notifications';
+import { router } from 'expo-router';
 import { Stack } from 'expo-router/stack';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useState } from 'react';
@@ -6,6 +8,7 @@ import { ActivityIndicator, AppState, ScrollView, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { T } from '../components/ui';
 import { track } from '../lib/activity';
+import { registerForPush } from '../lib/push';
 import { isConfigured, supabase } from '../lib/supabase';
 import { colors } from '../lib/theme';
 
@@ -23,9 +26,22 @@ export default function RootLayout() {
   useEffect(() => {
     if (!session) return;
     track('app_open');
+    registerForPush();
     const sub = AppState.addEventListener('change', (state) => {
       if (state === 'active') track('app_open');
     });
+    return () => sub.remove();
+  }, [session?.user.id]);
+
+  // Tapping a notification opens the screen it points to (e.g. /monitors).
+  useEffect(() => {
+    if (!session) return;
+    const open = (response: Notifications.NotificationResponse | null) => {
+      const url = response?.notification.request.content.data?.url;
+      if (typeof url === 'string') router.push(url as never);
+    };
+    open(Notifications.getLastNotificationResponse());
+    const sub = Notifications.addNotificationResponseReceivedListener(open);
     return () => sub.remove();
   }, [session?.user.id]);
 
@@ -54,6 +70,7 @@ export default function RootLayout() {
         <Stack.Protected guard={!!session}>
           <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
           <Stack.Screen name="project/[id]" options={{ title: 'المشروع' }} />
+          <Stack.Screen name="settings" options={{ title: 'الإعدادات' }} />
         </Stack.Protected>
         <Stack.Protected guard={!session}>
           <Stack.Screen name="login" options={{ headerShown: false }} />

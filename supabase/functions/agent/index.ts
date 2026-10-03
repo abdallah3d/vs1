@@ -20,11 +20,12 @@ const SYSTEM = `You are the personal project assistant inside "مشاريعي", 
 What you do:
 - Track projects and tasks: progress, what is overdue, what has gone stale, what to do next.
 - Monitor the user's apps and websites through the monitor tools (uptime, latency, failures).
+- Follow the GitHub repos linked to projects: recent commits, open pull requests, repos that have gone quiet.
 - Watch how the user uses this app (activity log) and point out patterns: neglected projects, streaks, days with no progress.
 - Chat, brainstorm, and suggest concrete next steps.
 
 How you work:
-- Always look at the real data with the tools before answering questions about projects, tasks, monitors, or activity. Never invent projects, numbers, or statuses.
+- Always look at the real data with the tools before answering questions about projects, tasks, monitors, GitHub, or activity. Never invent projects, numbers, or statuses.
 - When the user asks you to add or change something, do it with the tools, then say briefly what you changed. Don't create or change things the user didn't ask for; suggest them instead.
 - Reply in the same language and dialect the user writes in (usually Gulf Arabic). Be short and practical: bullets for lists, no long preambles.
 - Each user message starts with a [now: ...] line giving the current local date and time. Use it for anything date-related (overdue, "this week", due dates).
@@ -127,11 +128,13 @@ Deno.serve(async (req) => {
         system: SYSTEM,
         tools: TOOLS,
         messages: toMessages(rows),
-        thinking: { type: "adaptive" },
+        // drop_block: if a redeploy changed SYSTEM or TOOLS, older thinking
+        // blocks are dropped instead of failing the request.
+        thinking: { type: "adaptive", block_binding: { prefix_mismatch_behavior: "drop_block" } },
         output_config: { effort: "medium" },
         cache_control: { type: "ephemeral" },
         // If a safety classifier declines, the API retries on a suitable model.
-        betas: ["server-side-fallback-2026-07-01"],
+        betas: ["server-side-fallback-2026-07-01", "thinking-binding-controls-2026-08-01"],
         fallbacks: "default",
       });
       console.log("usage", JSON.stringify(response.usage));
@@ -175,7 +178,7 @@ Deno.serve(async (req) => {
       rows.push(toolRow);
     }
 
-    await db.from("activity_log").insert({ event: "agent_message", meta: { tools: toolsUsed } });
+    await db.from("activity_log").insert({ user_id: caller.userId, event: "agent_message", meta: { tools: toolsUsed } });
     return json({ reply: reply || "تم.", tools_used: toolsUsed });
   } catch (e) {
     console.error(e);
