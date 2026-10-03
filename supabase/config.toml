@@ -1,0 +1,9 @@
+# إعدادات Supabase CLI (الباقي يأخذ القيم الافتراضية)
+project_id = "mashari3i"
+
+# الدالتين تتحققان من المستخدم بنفسهما (أو من CRON_SECRET للجدولة)
+[functions.agent]
+verify_jwt = false
+
+[functions.monitor-check]
+verify_jwt = false
